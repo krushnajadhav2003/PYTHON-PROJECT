@@ -1,0 +1,391 @@
+-- 1. Create Rooms Table
+CREATE TABLE rooms (
+    room_id NUMBER(10) PRIMARY KEY,
+    room_type VARCHAR2(50),
+    capacity NUMBER(3),
+    occupied NUMBER(3) DEFAULT 0
+);
+
+-- 2. Create Students Table
+CREATE TABLE students (
+    student_id NUMBER(10) PRIMARY KEY,
+    first_name VARCHAR2(50),
+    last_name VARCHAR2(50),
+    contact_number VARCHAR2(15),
+    email VARCHAR2(100),
+    room_id NUMBER(10),
+    FOREIGN KEY (room_id) REFERENCES rooms(room_id)
+);
+
+-- 3. Create Fees Table
+CREATE TABLE fees (
+    fee_id NUMBER(10) PRIMARY KEY,
+    student_id NUMBER(10),
+    fee_amount NUMBER(10),
+    fee_status VARCHAR2(20) DEFAULT 'Pending',
+    due_date DATE,
+    FOREIGN KEY (student_id) REFERENCES students(student_id)
+);
+
+-- 4. Create Maintenance Table
+CREATE TABLE maintenance (
+    request_id NUMBER(10) PRIMARY KEY,
+    student_id NUMBER(10),
+    request_details VARCHAR2(255),
+    status VARCHAR2(20) DEFAULT 'Open',
+    request_date DATE,
+    FOREIGN KEY (student_id) REFERENCES students(student_id)
+);
+
+-- 5. Create Complaints Table
+CREATE TABLE complaints (
+    complaint_id NUMBER(10) PRIMARY KEY,
+    student_id NUMBER(10),
+    complaint_details VARCHAR2(255),
+    status VARCHAR2(20) DEFAULT 'Open',
+    submission_date DATE,
+    FOREIGN KEY (student_id) REFERENCES students(student_id)
+);
+
+-- 6. Create Room Allocation History Table
+CREATE TABLE room_allocation_history (
+    history_id NUMBER(10) PRIMARY KEY,
+    student_id NUMBER(10),
+    old_room_id NUMBER(10),
+    new_room_id NUMBER(10),
+    allocation_date DATE,
+    FOREIGN KEY (student_id) REFERENCES students(student_id),
+    FOREIGN KEY (old_room_id) REFERENCES rooms(room_id),
+    FOREIGN KEY (new_room_id) REFERENCES rooms(room_id)
+);
+
+-- 7. Create Fee Payment History Table
+CREATE TABLE fee_payment_history (
+    payment_id NUMBER(10) PRIMARY KEY,
+    student_id NUMBER(10),
+    payment_amount NUMBER(10),
+    payment_date DATE,
+    payment_method VARCHAR2(50),
+    FOREIGN KEY (student_id) REFERENCES students(student_id)
+);
+
+-- Create sequences for automatic IDs
+CREATE SEQUENCE room_allocation_history_seq START WITH 1 INCREMENT BY 1;
+CREATE SEQUENCE fee_payment_history_seq START WITH 1 INCREMENT BY 1;
+CREATE SEQUENCE maintenance_seq START WITH 1 INCREMENT BY 1;
+CREATE SEQUENCE complaints_seq START WITH 1 INCREMENT BY 1;
+
+-- Procedures
+-- Round Robin Room Allocation
+CREATE OR REPLACE PROCEDURE ROUND_ROBIN_ROOM_ALLOCATION AS
+  CURSOR room_cursor IS
+    SELECT room_id
+    FROM rooms
+    WHERE occupied < capacity;
+
+  TYPE student_id_array IS TABLE OF students.student_id%TYPE;
+  student_ids student_id_array;
+
+  room_id rooms.room_id%TYPE;
+
+BEGIN
+  -- Fetch all student IDs into the array
+  SELECT student_id BULK COLLECT INTO student_ids
+  FROM students
+  WHERE room_id IS NULL;
+
+  -- Loop over the student IDs and assign rooms in a round-robin fashion
+  FOR i IN 1..student_ids.COUNT LOOP
+    OPEN room_cursor;
+    FETCH room_cursor INTO room_id;
+    
+    -- If a room is available, assign it to the student
+    IF room_cursor%FOUND THEN
+      UPDATE students
+      SET room_id = room_id
+      WHERE student_id = student_ids(i);
+      
+      -- Update the occupied count of the room
+      UPDATE rooms
+      SET occupied = occupied + 1
+      WHERE room_id = room_id;
+    END IF;
+  END LOOP;
+
+  -- Close the cursor
+  CLOSE room_cursor;
+  
+  COMMIT;
+EXCEPTION
+  WHEN OTHERS THEN
+    -- Handle any exceptions that occur during the process
+    ROLLBACK;
+    DBMS_OUTPUT.PUT_LINE('Error: ' || SQLERRM);
+END ROUND_ROBIN_ROOM_ALLOCATION;
+/
+
+
+-- Add Student Procedure
+CREATE OR REPLACE PROCEDURE ADD_STUDENT (
+    p_student_id NUMBER,
+    p_first_name VARCHAR2,
+    p_last_name VARCHAR2,
+    p_contact_number VARCHAR2,
+    p_email VARCHAR2
+) AS
+BEGIN
+    -- Insert student into the students table
+    INSERT INTO students (student_id, first_name, last_name, contact_number, email, room_id)
+    VALUES (p_student_id, p_first_name, p_last_name, p_contact_number, p_email, NULL);
+    
+    -- Output success message
+    DBMS_OUTPUT.PUT_LINE('Student ' || p_first_name || ' ' || p_last_name || ' added successfully');
+END ADD_STUDENT;
+/
+
+
+-- Record Fee Payment Procedure
+CREATE OR REPLACE PROCEDURE record_fee_payment(
+    p_student_id NUMBER,
+    p_payment_amount NUMBER,
+    p_payment_method VARCHAR2
+) AS
+BEGIN
+    -- Insert payment record
+    INSERT INTO fee_payment_history (payment_id, student_id, payment_amount, payment_date, payment_method)
+    VALUES (fee_payment_history_seq.NEXTVAL, p_student_id, p_payment_amount, SYSDATE, p_payment_method);
+
+    -- Update fee status for the student
+    UPDATE fees SET fee_status = 'Paid' WHERE student_id = p_student_id AND fee_status = 'Pending';
+
+    DBMS_OUTPUT.PUT_LINE('Fee payment of ' || p_payment_amount || ' recorded for Student ' || p_student_id);
+END;
+/
+-- Add Maintenance Request Procedure
+CREATE OR REPLACE PROCEDURE add_maintenance_request(
+    p_student_id NUMBER,
+    p_request_details VARCHAR2
+) AS
+BEGIN
+    INSERT INTO maintenance (request_id, student_id, request_details, status, request_date)
+    VALUES (maintenance_seq.NEXTVAL, p_student_id, p_request_details, 'Open', SYSDATE);
+
+    DBMS_OUTPUT.PUT_LINE('Maintenance request added for Student ' || p_student_id);
+END;
+/
+-- Update Maintenance Status Procedure
+CREATE OR REPLACE PROCEDURE update_maintenance_status(
+    p_request_id NUMBER,
+    p_status VARCHAR2
+) AS
+BEGIN
+    UPDATE maintenance
+    SET status = p_status
+    WHERE request_id = p_request_id;
+
+    DBMS_OUTPUT.PUT_LINE('Maintenance request ' || p_request_id || ' updated to ' || p_status);
+END;
+/
+
+-- Functions
+-- Check Room Availability Function
+CREATE OR REPLACE FUNCTION check_room_availability(p_room_id NUMBER) RETURN VARCHAR2 AS
+    v_availability VARCHAR2(20);
+    v_capacity NUMBER;
+    v_occupied NUMBER;
+BEGIN
+    -- Retrieve room capacity and occupancy
+    SELECT capacity, occupied
+    INTO v_capacity, v_occupied
+    FROM rooms
+    WHERE room_id = p_room_id;
+
+    -- Check availability
+    IF (v_capacity - v_occupied) > 0 THEN
+        v_availability := 'Available';
+    ELSE
+        v_availability := 'Full';
+    END IF;
+
+    RETURN v_availability;
+END;
+/
+-- Get Student Fee Status Function
+CREATE OR REPLACE FUNCTION get_student_fee_status(p_student_id NUMBER) RETURN VARCHAR2 AS
+    v_fee_status VARCHAR2(20);
+BEGIN
+    SELECT fee_status INTO v_fee_status
+    FROM fees
+    WHERE student_id = p_student_id;
+
+    RETURN v_fee_status;
+END;
+/
+
+
+-- Insert Room Data
+INSERT INTO rooms (room_id, room_type, capacity, occupied) VALUES (1, 'Single', 2, 0);
+INSERT INTO rooms (room_id, room_type, capacity, occupied) VALUES (2, 'Double', 4, 2);
+INSERT INTO rooms (room_id, room_type, capacity, occupied) VALUES (3, 'Triple', 6, 3);
+INSERT INTO rooms (room_id, room_type, capacity, occupied) VALUES (4, 'Single', 2, 1);
+INSERT INTO rooms (room_id, room_type, capacity, occupied) VALUES (5, 'Single', 2, 0);
+INSERT INTO rooms (room_id, room_type, capacity, occupied) VALUES (6, 'Double', 4, 3);
+INSERT INTO rooms (room_id, room_type, capacity, occupied) VALUES (7, 'Triple', 6, 5);
+INSERT INTO rooms (room_id, room_type, capacity, occupied) VALUES (8, 'Double', 4, 2);
+INSERT INTO rooms (room_id, room_type, capacity, occupied) VALUES (9, 'Single', 2, 1);
+INSERT INTO rooms (room_id, room_type, capacity, occupied) VALUES (10, 'Triple', 6, 4);
+
+
+-- Insert Student Data
+INSERT INTO students (student_id, first_name, last_name, contact_number, email, room_id) 
+VALUES (101, 'John', 'Doe', '9876543210', 'john.doe@example.com', 1);
+INSERT INTO students (student_id, first_name, last_name, contact_number, email, room_id) 
+VALUES (102, 'Jane', 'Smith', '9887654321', 'jane.smith@example.com', 2);
+INSERT INTO students (student_id, first_name, last_name, contact_number, email, room_id) 
+VALUES (103, 'Emily', 'Johnson', '9876123456', 'emily.johnson@example.com', 3);
+INSERT INTO students (student_id, first_name, last_name, contact_number, email, room_id) 
+VALUES (104, 'Michael', 'Williams', '9765432109', 'michael.williams@example.com', 4);
+INSERT INTO students (student_id, first_name, last_name, contact_number, email, room_id) 
+VALUES (105, 'David', 'Brown', '9754321098', 'david.brown@example.com', 5);
+INSERT INTO students (student_id, first_name, last_name, contact_number, email, room_id) 
+VALUES (106, 'Sophia', 'Davis', '9345678901', 'sophia.davis@example.com', 6);
+INSERT INTO students (student_id, first_name, last_name, contact_number, email, room_id) 
+VALUES (107, 'Daniel', 'Miller', '9234567890', 'daniel.miller@example.com', 7);
+INSERT INTO students (student_id, first_name, last_name, contact_number, email, room_id) 
+VALUES (108, 'Isabella', 'Wilson', '9123456789', 'isabella.wilson@example.com', 8);
+INSERT INTO students (student_id, first_name, last_name, contact_number, email, room_id) 
+VALUES (109, 'Ethan', 'Moore', '9112345678', 'ethan.moore@example.com', 9);
+INSERT INTO students (student_id, first_name, last_name, contact_number, email, room_id) 
+VALUES (110, 'Olivia', 'Taylor', '9101234567', 'olivia.taylor@example.com', 10);
+
+
+
+-- Insert Fee Data
+INSERT INTO fees (fee_id, student_id, fee_amount, fee_status, due_date) 
+VALUES (1, 101, 5000, 'Pending', TO_DATE('2025-05-01', 'YYYY-MM-DD'));
+INSERT INTO fees (fee_id, student_id, fee_amount, fee_status, due_date) 
+VALUES (2, 102, 5500, 'Pending', TO_DATE('2025-05-01', 'YYYY-MM-DD'));
+INSERT INTO fees (fee_id, student_id, fee_amount, fee_status, due_date) 
+VALUES (3, 103, 6000, 'Pending', TO_DATE('2025-05-01', 'YYYY-MM-DD'));
+INSERT INTO fees (fee_id, student_id, fee_amount, fee_status, due_date) 
+VALUES (4, 104, 5200, 'Pending', TO_DATE('2025-05-01', 'YYYY-MM-DD'));
+INSERT INTO fees (fee_id, student_id, fee_amount, fee_status, due_date) 
+VALUES (5, 105, 4800, 'Pending', TO_DATE('2025-05-01', 'YYYY-MM-DD'));
+INSERT INTO fees (fee_id, student_id, fee_amount, fee_status, due_date) 
+VALUES (6, 106, 5500, 'Pending', TO_DATE('2025-05-01', 'YYYY-MM-DD'));
+INSERT INTO fees (fee_id, student_id, fee_amount, fee_status, due_date) 
+VALUES (7, 107, 5000, 'Pending', TO_DATE('2025-05-01', 'YYYY-MM-DD'));
+INSERT INTO fees (fee_id, student_id, fee_amount, fee_status, due_date) 
+VALUES (8, 108, 5300, 'Pending', TO_DATE('2025-05-01', 'YYYY-MM-DD'));
+INSERT INTO fees (fee_id, student_id, fee_amount, fee_status, due_date) 
+VALUES (9, 109, 4900, 'Pending', TO_DATE('2025-05-01', 'YYYY-MM-DD'));
+INSERT INTO fees (fee_id, student_id, fee_amount, fee_status, due_date) 
+VALUES (10, 110, 5200, 'Pending', TO_DATE('2025-05-01', 'YYYY-MM-DD'));
+
+
+
+-- Insert Maintenance Requests Data
+INSERT INTO maintenance (request_id, student_id, request_details, status, request_date)
+VALUES (1, 101, 'AC not cooling', 'Open', SYSDATE);
+INSERT INTO maintenance (request_id, student_id, request_details, status, request_date)
+VALUES (2, 102, 'Water leakage in bathroom', 'Open', SYSDATE);
+INSERT INTO maintenance (request_id, student_id, request_details, status, request_date)
+VALUES (3, 103, 'Broken window', 'Open', SYSDATE);
+INSERT INTO maintenance (request_id, student_id, request_details, status, request_date)
+VALUES (4, 104, 'Electrical issue in room', 'Open', SYSDATE);
+INSERT INTO maintenance (request_id, student_id, request_details, status, request_date)
+VALUES (5, 105, 'Faulty light switch', 'Open', SYSDATE);
+INSERT INTO maintenance (request_id, student_id, request_details, status, request_date)
+VALUES (6, 106, 'Clogged drain', 'Open', SYSDATE);
+INSERT INTO maintenance (request_id, student_id, request_details, status, request_date)
+VALUES (7, 107, 'No hot water in shower', 'Open', SYSDATE);
+INSERT INTO maintenance (request_id, student_id, request_details, status, request_date)
+VALUES (8, 108, 'Broken door lock', 'Open', SYSDATE);
+INSERT INTO maintenance (request_id, student_id, request_details, status, request_date)
+VALUES (9, 109, 'WiFi not working', 'Open', SYSDATE);
+INSERT INTO maintenance (request_id, student_id, request_details, status, request_date)
+VALUES (10, 110, 'Room heater not working', 'Open', SYSDATE);
+
+
+
+
+-- Insert Complaints Data
+INSERT INTO complaints (complaint_id, student_id, complaint_details, status, submission_date)
+VALUES (1, 101, 'Noise disturbance from neighbors', 'Open', SYSDATE);
+INSERT INTO complaints (complaint_id, student_id, complaint_details, status, submission_date)
+VALUES (2, 102, 'Food quality issues in mess', 'Open', SYSDATE);
+INSERT INTO complaints (complaint_id, student_id, complaint_details, status, submission_date)
+VALUES (3, 103, 'Pest infestation in room', 'Open', SYSDATE);
+INSERT INTO complaints (complaint_id, student_id, complaint_details, status, submission_date)
+VALUES (4, 104, 'Uncleanliness in common areas', 'Open', SYSDATE);
+INSERT INTO complaints (complaint_id, student_id, complaint_details, status, submission_date)
+VALUES (5, 105, 'Loud music playing at night', 'Open', SYSDATE);
+INSERT INTO complaints (complaint_id, student_id, complaint_details, status, submission_date)
+VALUES (6, 106, 'Water supply issues', 'Open', SYSDATE);
+INSERT INTO complaints (complaint_id, student_id, complaint_details, status, submission_date)
+VALUES (7, 107, 'Kitchen hygiene problems', 'Open', SYSDATE);
+INSERT INTO complaints (complaint_id, student_id, complaint_details, status, submission_date)
+VALUES (8, 108, 'Lack of security in the hostel', 'Open', SYSDATE);
+INSERT INTO complaints (complaint_id, student_id, complaint_details, status, submission_date)
+VALUES (9, 109, 'Overcrowded rooms', 'Open', SYSDATE);
+INSERT INTO complaints (complaint_id, student_id, complaint_details, status, submission_date)
+VALUES (10, 110, 'Lack of recreational facilities', 'Open', SYSDATE);
+
+
+
+-- Insert Room Allocation History Data
+INSERT INTO room_allocation_history (history_id, student_id, old_room_id, new_room_id, allocation_date)
+VALUES (1, 101, NULL, 1, SYSDATE);
+INSERT INTO room_allocation_history (history_id, student_id, old_room_id, new_room_id, allocation_date)
+VALUES (2, 102, NULL, 2, SYSDATE);
+INSERT INTO room_allocation_history (history_id, student_id, old_room_id, new_room_id, allocation_date)
+VALUES (3, 103, NULL, 3, SYSDATE);
+INSERT INTO room_allocation_history (history_id, student_id, old_room_id, new_room_id, allocation_date)
+VALUES (4, 104, NULL, 4, SYSDATE);
+INSERT INTO room_allocation_history (history_id, student_id, old_room_id, new_room_id, allocation_date)
+VALUES (5, 105, NULL, 5, SYSDATE);
+INSERT INTO room_allocation_history (history_id, student_id, old_room_id, new_room_id, allocation_date)
+VALUES (6, 106, NULL, 6, SYSDATE);
+INSERT INTO room_allocation_history (history_id, student_id, old_room_id, new_room_id, allocation_date)
+VALUES (7, 107, NULL, 7, SYSDATE);
+INSERT INTO room_allocation_history (history_id, student_id, old_room_id, new_room_id, allocation_date)
+VALUES (8, 108, NULL, 8, SYSDATE);
+INSERT INTO room_allocation_history (history_id, student_id, old_room_id, new_room_id, allocation_date)
+VALUES (9, 109, NULL, 9, SYSDATE);
+INSERT INTO room_allocation_history (history_id, student_id, old_room_id, new_room_id, allocation_date)
+VALUES (10, 110, NULL, 10, SYSDATE);
+
+
+
+-- Insert Fee Payment History Data
+INSERT INTO fee_payment_history (payment_id, student_id, payment_amount, payment_date, payment_method)
+VALUES (1, 101, 5000, TO_DATE('2025-01-10', 'YYYY-MM-DD'), 'Cash');
+INSERT INTO fee_payment_history (payment_id, student_id, payment_amount, payment_date, payment_method)
+VALUES (2, 102, 5500, TO_DATE('2025-01-12', 'YYYY-MM-DD'), 'Bank Transfer');
+INSERT INTO fee_payment_history (payment_id, student_id, payment_amount, payment_date, payment_method)
+VALUES (3, 103, 6000, TO_DATE('2025-01-14', 'YYYY-MM-DD'), 'Credit Card');
+INSERT INTO fee_payment_history (payment_id, student_id, payment_amount, payment_date, payment_method)
+VALUES (4, 104, 5200, TO_DATE('2025-01-16', 'YYYY-MM-DD'), 'Debit Card');
+INSERT INTO fee_payment_history (payment_id, student_id, payment_amount, payment_date, payment_method)
+VALUES (5, 105, 4800, TO_DATE('2025-01-18', 'YYYY-MM-DD'), 'Cash');
+INSERT INTO fee_payment_history (payment_id, student_id, payment_amount, payment_date, payment_method)
+VALUES (6, 106, 5500, TO_DATE('2025-01-20', 'YYYY-MM-DD'), 'Bank Transfer');
+INSERT INTO fee_payment_history (payment_id, student_id, payment_amount, payment_date, payment_method)
+VALUES (7, 107, 5000, TO_DATE('2025-01-22', 'YYYY-MM-DD'), 'Credit Card');
+INSERT INTO fee_payment_history (payment_id, student_id, payment_amount, payment_date, payment_method)
+VALUES (8, 108, 5300, TO_DATE('2025-01-24', 'YYYY-MM-DD'), 'Debit Card');
+INSERT INTO fee_payment_history (payment_id, student_id, payment_amount, payment_date, payment_method)
+VALUES (9, 109, 4900, TO_DATE('2025-01-26', 'YYYY-MM-DD'), 'Cash');
+INSERT INTO fee_payment_history (payment_id, student_id, payment_amount, payment_date, payment_method)
+VALUES (10, 110, 5200, TO_DATE('2025-01-28', 'YYYY-MM-DD'), 'Bank Transfer');
+
+
+
+
+SELECT * FROM rooms;
+SELECT * FROM students;
+SELECT * FROM fees;
+SELECT * FROM maintenance;
+SELECT * FROM complaints
+SELECT * FROM room_allocation_history;
+SELECT * FROM fee_payment_history;
